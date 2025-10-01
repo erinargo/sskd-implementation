@@ -1,0 +1,4 @@
+# ADAPTIVE USER INTERFACES (AUIs)
+
+AUIs are a relatively new paradigm within Human-Computer Interaction. The idea is simple -- feed context information into a system that makes decisions and allow it to make 
+changes to interfaces in real time. I work with Augmented/Virtual Reality (AR/VR) technology with a focus on Augmented Reality. The interfaces in AR/VR are different than the interfaces used traditionally on a desktop or mobile device. In AR/VR, the interfaces are 3D User Interfaces as opposed to 2D User interfaces. Not only that, but the context that AR/VR interfaces are used in is fundamentally different. Particularly with Augmented Reality, the context is not just the actions the user takes but also the real world around the user
