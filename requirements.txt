@@ -1,0 +1,14 @@
+# PyTorch + CUDA 11.7
+torch==1.13.1+cu117
+torchvision==0.14.1+cu117
+
+# TensorBoard logging
+tensorboardX==2.6
+
+# Common dependencies
+numpy==1.21.6
+pillow==9.5.0
+requests<2.29
+urllib3<2
+typing-extensions==4.7.1
+certifi==2025.8.3
