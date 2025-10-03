@@ -1,3 +1,33 @@
+# Running the Code
+## Requirements
+I ran this code on Windows with Python 3.8.0, torch 1.13.1, torchvision 0.14.1
+
+```pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 -f https://download.pytorch.org/whl/cu117/torch_stable.html```
+
+## Running
+
+### Teacher Training
+An example of teacher training is:
+```
+python teacher.py --arch wrn_40_2 --lr 0.05 --gpu-id 0
+```
+where you can specify the architecture via flag `--arch`
+
+You can also download all the pre-trained teacher models [here](https://drive.google.com/drive/folders/1vJ0VdeFRd9a50ObbBD8SslBtmqmj8p8r?usp=sharing).
+If you want to run `student.py` directly, you have to re-organise the directory. For instance, when you download *vgg13.pth*, you have to make a directory for it, say *teacher_vgg13*, and then make a new directory *ckpt* inside *teacher_vgg13*. Move the *vgg13.pth* into *teacher_vgg13/ckpt* and rename it as *best.pth*. If you want a simpler way to use pre-trained model, you can edit the code in `student.py` (line 90).
+
+### Student Training
+An example of student training is:
+```
+python student.py --t-path ./experiments/teacher_wrn_40_2_seed0/ --s-arch wrn_16_2 --lr 0.05 --gpu-id 0
+```
+The meanings of flags are:
+> `--t-path`: teacher's checkpoint path. Automatically search the checkpoint containing 'best' keyword in its name.
+
+> `--s-arch`: student's architecture.
+
+All the commands can be found in `command.sh`
+
 # ADAPTIVE USER INTERFACES (AUIs)
 ### --- Information that you are already semi-aware of if not tired of hearing
 
