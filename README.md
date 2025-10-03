@@ -1,81 +1,56 @@
-# SSKD
-This repo is the implementation of paper [Knowledge Distillation Meets Self-Supervision](https://arxiv.org/abs/2006.07114) (ECCV 2020).
+# ADAPTIVE USER INTERFACES (AUIs)
+### --- Information that you are already semi-aware of if not tired of hearing
 
-<img src="https://github.com/xuguodong03/SSKD/raw/master/frm.png" width="100%" height="100%">
+AUIs are a relatively new paradigm within Human-Computer Interaction. The idea is simple -- 
+feed context information into a system that makes decisions and allow it to make 
+changes to interfaces in real time. I work with Augmented/Virtual Reality (AR/VR) technology with a focus on Augmented Reality. 
+The interfaces in AR/VR are different than the interfaces used traditionally on a desktop or mobile device. 
+In AR/VR, the interfaces are 3D User Interfaces as opposed to 2D User interfaces. 
+Not only that, but the context that AR/VR interfaces are used in is fundamentally different. Particularly with Augmented Reality, 
+the context is not just the actions the user takes but also the real world around the user. It is impossible to ask a developer to account for this context.
+Take a bottle of hand sanitizer for example. What do you do with Sanitizer? Well, it's used for cleaning hands. What else?
+Well, the bottle might be round or square but that information is superficial and tells us nothing about the sanitizer itself.
 
-## Prerequisite
-This repo is tested with Ubuntu 16.04.5, Python 3.7, PyTorch 1.5.0, CUDA 10.2.
-Make sure to install pytorch, torchvision, tensorboardX, numpy before using this repo.
+One thing that I personally forgot when considering sanitizer is that it is flammable. This means that it is harmful to someone. 
+Additionally, you don't quite want to drink it either so it is also toxic. 
 
-## Running
+# Making the jump from traditional computing to adaptive computing
+Adaptivity has a certain standard that must be met. As per the seminal paper by Salehie and Tahvildari (though, paraphrased), 
+the system must first be capable of making decisions. 
+The system must be able to act autonomously. The system must be capable of doing both independently and without developer input. 
 
-### Teacher Training
-An example of teacher training is:
-```
-python teacher.py --arch wrn_40_2 --lr 0.05 --gpu-id 0
-```
-where you can specify the architecture via flag `--arch`
+An example of a system that seems adaptive at first glance but is really more of a hybrid "In-between" model. 
+It has a model of concepts, their properties, and their relationships among specific domains -- otherwise known as an ontology model. 
+It has some sort of reasoner that determines things based on this model. And then, as developers, we can do things with the information the reasoner returns.
+This is the setup that I have for the adaptive user interfaces module in FirstModulAR. In this project, what we do with the information the reasoner returns 
+is pass it on to a brute-force subset search algorithm that determines, based on weights, how closely related a semantic relationship is to an interaface. 
 
-You can also download all the pre-trained teacher models [here](https://drive.google.com/drive/folders/1vJ0VdeFRd9a50ObbBD8SslBtmqmj8p8r?usp=sharing). 
-If you want to run `student.py` directly, you have to re-organise the directory. For instance, when you download *vgg13.pth*, you have to make a directory for it, say *teacher_vgg13*, and then make a new directory *ckpt* inside *teacher_vgg13*. Move the *vgg13.pth* into *teacher_vgg13/ckpt* and rename it as *best.pth*. If you want a simpler way to use pre-trained model, you can edit the code in `student.py` (line 90).
+![Basic Model of Traditional 'Adaptive' approach](images/Base%20Model.png)
 
-### Student Training
-An example of student training is:
-```
-python student.py --t-path ./experiments/teacher_wrn_40_2_seed0/ --s-arch wrn_16_2 --lr 0.05 --gpu-id 0
-```
-The meanings of flags are:
-> `--t-path`: teacher's checkpoint path. Automatically search the checkpoint containing 'best' keyword in its name.
+### --- New Information
 
-> `--s-arch`: student's architecture.
+Some problems with this approach. I am the one who made the ontology model used and I am most certainly not able as a developer to determine everything about everything.
+I am the one who decided the weights used in the combinatorial optimization step which is really just one giant and complicated `if` statement when you break it down. 
+This system is, most importantly ```not adaptive```. It does not make decisions independent of my input. We need something that can determine information that is not obvious to a developer 
+or immediately obvious to any given person looking at the world. It must be capable of taking in large amounts of context. It must also be able to extract hidden information and assign a weight to it.
 
-All the commands can be found in `command.sh`
+# SSKD for FMAR
 
-## Results (Top-1 Acc) on CIFAR100
+This is where I'm going to start writing a little more candidly. SSKD seems to me to be a great first step in altering our approach from dynamic programming to truly adaptive programming.
 
-### Similar-Architecture
+Here is the revised model including SSKD which replaces both the ontology and reasoner with soft labels.
+![Revised SSKD Approach](images/SSKD_Revised.png)
 
-| Teacher <br> Student | wrn40-2 <br> wrn16-2 | wrn40-2 <br> wrn40-1 | resnet56 <br> resnet20 | resnet32x4 <br> resnet8x4 |  vgg13 <br> vgg8 |
-|:---------------:|:-----------------:|:-----------------:|:-----------------:|:--------------------:|:-----------:|
-| Teacher <br> Student |    76.46 <br> 73.64    |    76.46 <br> 72.24    |    73.44 <br> 69.63    |     79.63 <br> 72.51     | 75.38 <br> 70.68 |
-| KD | 74.92 | 73.54 | 70.66 | 73.33 | 72.98 |
-| FitNet | 75.75 | 74.12 | 71.60 | 74.31 | 73.54 |
-| AT | 75.28 | 74.45 | **71.78** | 74.26 | 73.62 |
-| SP | 75.34 | 73.15 | 71.48 | 74.74 | 73.44 |
-| VID | 74.79 | 74.20 | 71.71 | 74.82 | 73.96 |
-| RKD | 75.40 | 73.87 | 71.48 | 74.47 | 73.72 |
-| PKT | 76.01 | 74.40 | 71.44 | 74.17 | 73.37 |
-| AB | 68.89 | 75.06 | 71.49 | 74.45 | 74.27 |
-| FT | 75.15 | 74.37 | 71.52 | 75.02 | 73.42 |
-| CRD | **76.04** | 75.52 | 71.68 | 75.90 | 74.06 |
-| **SSKD** | **76.04** | **76.13** | 71.49 | **76.20** | **75.33** |
+Additionally, here is the current study design for the FMAR adaptive module.
+![Study Design](images/Study%201%20Design.png)
 
-### Cross-Architecture
+# SSKD Class Project
+The first step we need to determine in an implementation for a potential future FMAR study design is determining an optimal pre-text task. My goal for this 
+class is two-fold:
+- Determine if pre-text task affects model performance
+- - Determine how to measure model performance as impacted by task
+- Determine if a universal pre-text task exists
+- - ~~Cry if not~~
+- - If no universal pre-text task exists, determine a way to create optimized tasks for universal inputs based on the final goal of the model
 
-| Teacher <br> Student | vgg13 <br> MobieleNetV2 | ResNet50 <br> MobileNetV2 | ResNet50 <br> vgg8 | resnet32x4 <br> ShuffleV1 |  resnet32x4 <br> ShuffleV2 | wrn40-2 <br> ShuffleV1|
-|:---------------:|:-----------------:|:-----------------:|:-----------------:|:--------------------:|:-----------:|:-------------:|
-| Teacher <br> Student |    75.38 <br> 65.79    |    79.10 <br> 65.79    |    79.10 <br> 70.68    |    79.63 <br> 70.77     | 79.63 <br> 73.12 | 76.46 <br> 70.77 |
-| KD | 67.37 | 67.35| 73.81| 74.07| 74.45| 74.83|
-| FitNet |68.58 | 68.54 | 73.84 | 74.82 | 75.11 | 75.55 |
-| AT | 69.34 | 69.28 | 73.45 | 74.76 | 75.30 | 75.61 |
-| SP | 66.89 | 68.99 | 73.86 | 73.80 | 75.15 | 75.56 |
-| VID | 66.91 | 68.88 | 73.75 | 74.28 | 75.78 | 75.36 |
-| RKD | 68.50 | 68.46 | 73.73 | 74.20 | 75.74 | 75.45 |
-| PKT | 67.89 | 68.44 | 73.53 | 74.06 | 75.18 | 75.51 |
-| AB | 68.86 | 69.32 | 74.20 | 76.24 | 75.66 | 76.58 |
-| FT | 69.19 | 69.01 | 73.58 | 74.31 | 74.95 | 75.18 |
-| CRD | 68.49 | 70.32 | 74.42 | 75.46 | 75.72 | 75.96 |
-| **SSKD** | **71.53** | **72.57** | **75.76** | **78.44** | **78.61** | **77.40** |
-
-## Citation
-If you find this repo useful for your research, please consider citing the paper
-```
-@inproceedings{xu2020knowledge,
-    title={Knowledge Distillation Meets Self-Supervision},
-    author={Xu, Guodong and Liu, Ziwei and Li, Xiaoxiao and Loy, Chen Change},
-    booktitle={European Conference on Computer Vision (ECCV)},
-    year={2020},
-}
-```
-## Acknowledgement
-The implementation of `models` is borrowed from [CRD](https://github.com/HobbitLong/RepDistiller)
+Then, I will attempt a soft-implementation of this model into the FMAR architecture as described above.
