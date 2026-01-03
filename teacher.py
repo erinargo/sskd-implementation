@@ -11,186 +11,439 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader
 
+import torch.multiprocessing as mp
+
+from torch.utils.data import Dataset
+from torchvision.datasets import CocoDetection
+import torchvision
+
 import torchvision.transforms as transforms
-from torchvision.datasets import CIFAR100
+#from torchvision.datasets import CIFAR100
 from tensorboardX import SummaryWriter
 
 from utils import AverageMeter, accuracy   # helper functions for tracking metrics
 from models import model_dict              # dictionary of models (defined elsewhere)
 
+import random
+
 # Enable cudnn autotuner to select the fastest convolution algorithm
 torch.backends.cudnn.benchmark = True
 
+NUM_COCO_CLASSES = 80      # standard COCO object categories
+NUM_SSV2_CLASSES = 174     # Something-Something V2 action classes (v2)
+
+import json
+from PIL import Image
+
+import os
+import subprocess
+
+videos_dir = "./ssv2/videos/"
+out_dir = "./ssv2/frames/train/"
+
+os.makedirs(out_dir, exist_ok=True)
+
+for video in os.listdir(videos_dir):
+    if not video.endswith(".webm"):
+        continue
+
+    vid = video.replace(".webm", "")
+    out_path = os.path.join(out_dir, vid)
+    os.makedirs(out_path, exist_ok=True)
+
+    cmd = [
+        "ffmpeg",
+        "-i", os.path.join(videos_dir, video),
+        os.path.join(out_path, "%05d.jpg")
+    ]
+
+    print("Extracting:", video)
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class COCOClassification(Dataset):
+    def __init__(self, root, annFile, transform=None):
+        self.root = root
+        self.transform = transform
+
+        # Load annotation JSON manually
+        with open(annFile, 'r') as f:
+            data = json.load(f)
+
+        # Extract categories → contiguous indexing
+        categories = data['categories']
+        cat_ids = sorted([c['id'] for c in categories])
+        self.catid2idx = {cid: i for i, cid in enumerate(cat_ids)}
+
+        # Build mapping: image_id → first annotation's category
+        self.image_info = {}
+        for img in data['images']:
+            self.image_info[img['id']] = {
+                "file_name": img["file_name"],
+                "category_id": None   # fill later
+            }
+
+        # Fill category ids (just use first annotation per image)
+        for ann in data['annotations']:
+            img_id = ann['image_id']
+            if self.image_info[img_id]["category_id"] is None:
+                self.image_info[img_id]["category_id"] = ann["category_id"]
+
+        # Convert dict → list
+        self.entries = []
+        for img_id, info in self.image_info.items():
+            file_name = info["file_name"]
+            cat_id = info["category_id"]
+            if cat_id is None:
+                # skip images without labels
+                continue
+            label = self.catid2idx[cat_id]
+            self.entries.append((file_name, label))
+
+    def __len__(self):
+        return len(self.entries)
+
+    def __getitem__(self, idx):
+        file_name, label = self.entries[idx]
+
+        # Load the image
+        path = os.path.join(self.root, file_name)
+        img = Image.open(path).convert("RGB")
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label
+
+
+
+import json
+import os
+import random
+import torchvision
+from torch.utils.data import Dataset
+
+class SomethingSomethingFrameDataset(Dataset):
+    """
+    Frame-based SSv2 dataset built from JSON list:
+    [
+      {"id": "78687", "template": "...", ...},
+      ...
+    ]
+    Uses 'template' as class; maps unique templates to indices.
+    """
+    def __init__(self, json_file, frame_root, transform=None, template2idx=None):
+        self.frame_root = frame_root
+        self.transform = transform
+
+        with open(json_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            raise ValueError("Expected SSv2 JSON to be a list of dicts.")
+
+        # Build template mapping if not provided (train)
+        if template2idx is None:
+            templates = sorted({item["template"] for item in data if "template" in item})
+            self.template2idx = {t: i for i, t in enumerate(templates)}
+        else:
+            self.template2idx = template2idx
+
+        self.samples = []
+        for item in data:
+            vid = item.get("id")
+            templ = item.get("template")
+            if vid is None or templ is None:
+                continue
+            if templ not in self.template2idx:
+                continue
+
+            label = self.template2idx[templ]
+            frame_dir = os.path.join(frame_root, str(vid))
+            if not os.path.isdir(frame_dir):
+                continue
+
+            frames = [f for f in os.listdir(frame_dir) if f.lower().endswith(".jpg")]
+            if not frames:
+                continue
+
+            self.samples.append((frame_dir, frames, label))
+
+        if len(self.samples) == 0:
+            raise RuntimeError(
+                f"No valid SSv2 samples found under {frame_root}. "
+                "Check that video ids in JSON match folder names."
+            )
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        frame_dir, frames, label = self.samples[idx]
+        fname = random.choice(frames)
+        path = os.path.join(frame_dir, fname)
+
+        img = Image.open(path).convert("RGB")
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label
+
+class MultiHeadTeacher(nn.Module):
+    def __init__(self, num_coco_classes, num_ssv2_classes):
+        super().__init__()
+
+        # backbone – ImageNet-style
+        backbone = torchvision.models.resnet50(weights=None)
+        in_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()  # we’ll provide our own heads
+        self.backbone = backbone
+
+        # heads
+        self.head_coco = nn.Linear(in_dim, num_coco_classes)
+        self.head_ssv2 = nn.Linear(in_dim, num_ssv2_classes)
+
+    def forward(self, x, dataset: str):
+        """
+        dataset: 'coco' or 'ssv2'
+        """
+        feat = self.backbone(x)  # [B, in_dim]
+        if dataset == 'coco':
+            return self.head_coco(feat)
+        elif dataset == 'ssv2':
+            return self.head_ssv2(feat)
+        else:
+            raise ValueError(f"Unknown dataset tag: {dataset}")
+
 
 def main():
-    # ---------------------------
-    # Parse training arguments
-    # ---------------------------
-    parser = argparse.ArgumentParser(description='Train teacher network on CIFAR100.')
-    parser.add_argument('--epoch', type=int, default=240)             # total number of epochs
-    parser.add_argument('--batch-size', type=int, default=64)         # training batch size
-    parser.add_argument('--lr', type=float, default=0.05)             # learning rate
-    parser.add_argument('--momentum', type=float, default=0.9)        # SGD momentum
-    parser.add_argument('--weight-decay', type=float, default=5e-4)   # L2 regularization
-    parser.add_argument('--gamma', type=float, default=0.1)           # LR decay factor
-    parser.add_argument('--milestones', type=int, nargs='+', default=[150,180,210])  # LR schedule
-
-    parser.add_argument('--save-interval', type=int, default=40)      # save checkpoint frequency
-    parser.add_argument('--arch', type=str)                           # model architecture key
-    parser.add_argument('--seed', type=int, default=0)                # random seed for reproducibility
-    parser.add_argument('--gpu-id', type=int, default=0)              # GPU device id
-
+    parser = argparse.ArgumentParser(description='Train multi-head teacher on COCO + SSv2.')
+    parser.add_argument('--epoch', type=int, default=50)
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--lr', type=float, default=0.05)
+    parser.add_argument('--momentum', type=float, default=0.9)
+    parser.add_argument('--weight-decay', type=float, default=5e-4)
+    parser.add_argument('--gamma', type=float, default=0.1)
+    parser.add_argument('--milestones', type=int, nargs='+', default=[30, 40])
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--gpu-id', type=int, default=0)
     args = parser.parse_args()
 
-    # ---------------------------
-    # Set random seeds
-    # ---------------------------
+    # seeds
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
     np.random.seed(args.seed)
+    random.seed(args.seed)
 
-    # Choose which GPU to use
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 
-    # Experiment setup (directory to save logs and checkpoints)
-    exp_name = 'teacher_{}_seed{}'.format(args.arch, args.seed)
-    exp_path = './experiments/{}'.format(exp_name)
+    exp_name = f'teacher_multih_{args.seed}'
+    exp_path = f'./experiments/{exp_name}'
     os.makedirs(exp_path, exist_ok=True)
 
-    # ---------------------------
-    # Data preprocessing
-    # ---------------------------
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),               # data augmentation
-        transforms.RandomHorizontalFlip(),                  # random mirror
-        transforms.ToTensor(),                              # convert to tensor
-        transforms.Normalize(mean=[0.5071, 0.4866, 0.4409], # normalize with CIFAR100 stats
-                             std=[0.2675, 0.2565, 0.2761]),
-    ])
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5071, 0.4866, 0.4409],
-                             std=[0.2675, 0.2565, 0.2761]),
+        transforms.Resize(256),
+        transforms.RandomResizedCrop(224, scale=(0.6, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),  # <-- converts PIL OR ndarray to Tensor
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        ),
     ])
 
-    # Load CIFAR100 train/test datasets
-    trainset = CIFAR100('./data', train=True, transform=transform_train, download=True)
-    valset = CIFAR100('./data', train=False, transform=transform_test, download=True)
+    # ---------------------------
+    # Datasets & loaders
+    # ---------------------------
+    coco_train = COCOClassification(
+        root="./coco/train2017",
+        annFile="./coco/annotations/instances_train2017.json",
+        transform=transform_train
+    )
+    coco_loader = DataLoader(
+        coco_train, batch_size=args.batch_size,
+        shuffle=True, num_workers=2, pin_memory=True
+    )
 
-    # Create DataLoaders
-    train_loader = DataLoader(trainset, batch_size=args.batch_size,
-                              shuffle=True, num_workers=4, pin_memory=False)
-    val_loader = DataLoader(valset, batch_size=args.batch_size,
-                            shuffle=False, num_workers=4, pin_memory=False)
+    ssv2_train = SomethingSomethingFrameDataset(
+        json_file="./ssv2/train.json",
+        frame_root="./ssv2/frames/",
+        transform=transform_train
+    )
+    NUM_SSV2_CLASSES = len(ssv2_train.template2idx)
+
+    ssv2_val = SomethingSomethingFrameDataset(
+        json_file="./ssv2/validation.json",  # if you have it
+        frame_root="./ssv2/frames/",
+        transform=transform_train,
+        template2idx=ssv2_train.template2idx
+    )
+
+    print("SSv2 template classes:", NUM_SSV2_CLASSES)
+
+    ssv2_loader = DataLoader(
+        ssv2_train, batch_size=args.batch_size,
+        shuffle=True, num_workers=2, pin_memory=True
+    )
+
+    coco_iter = iter(coco_loader)
+    ssv2_iter = iter(ssv2_loader)
+
+    # ---------------------------
+    # COCO Validation Dataset
+    # ---------------------------
+    coco_val = COCOClassification(
+        root="./coco/val2017",
+        annFile="./coco/annotations/instances_val2017.json",
+        transform=transform_train  # you can switch to transform_test
+    )
+
+    coco_val_loader = DataLoader(
+        coco_val, batch_size=args.batch_size,
+        shuffle=False, num_workers=2, pin_memory=True
+    )
+
+    # ---------------------------
+    # SSv2 Validation Dataset
+    # ---------------------------
+    ssv2_loader = DataLoader(
+        ssv2_train, batch_size=args.batch_size,
+        shuffle=True, num_workers=2, pin_memory=True
+    )
+
+    ssv2_val_loader = DataLoader(
+        ssv2_val, batch_size=args.batch_size,
+        shuffle=False, num_workers=2, pin_memory=True
+    )
 
     # ---------------------------
     # Model, optimizer, scheduler
     # ---------------------------
-    model = model_dict[args.arch](num_classes=100).cuda()   # load chosen architecture
+    model = MultiHeadTeacher(NUM_COCO_CLASSES, NUM_SSV2_CLASSES).cuda()
     optimizer = optim.SGD(model.parameters(), lr=args.lr,
                           momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
 
-    # TensorBoard logger
     logger = SummaryWriter(osp.join(exp_path, 'events'))
-    best_acc = -1   # track best validation accuracy
+    best_coco_acc = -1.0  # you can extend this for ssv2 if you later add val
 
     # ---------------------------
     # Training loop
     # ---------------------------
     for epoch in range(args.epoch):
         model.train()
-        loss_record = AverageMeter()  # track average training loss
-        acc_record = AverageMeter()   # track average training accuracy
+        loss_record = AverageMeter()
+        acc_record = AverageMeter()
 
         start = time.time()
-        for x, target in train_loader:
+
+        # define number of steps per epoch
+        steps_per_epoch = max(len(coco_loader), len(ssv2_loader))
+
+        for step in range(steps_per_epoch):
+            # randomly choose dataset for this step
+            if random.random() < 0.5:
+                dataset_name = 'coco'
+                try:
+                    x, target = next(coco_iter)
+                except StopIteration:
+                    coco_iter = iter(coco_loader)
+                    x, target = next(coco_iter)
+            else:
+                dataset_name = 'ssv2'
+                try:
+                    x, target = next(ssv2_iter)
+                except StopIteration:
+                    ssv2_iter = iter(ssv2_loader)
+                    x, target = next(ssv2_iter)
+
+            x = x.cuda(non_blocking=True)
+            target = target.cuda(non_blocking=True)
+
             optimizer.zero_grad()
-
-            # Move batch to GPU
-            x = x.cuda()
-            target = target.cuda()
-
-            # Forward pass
-            output = model(x)
-            loss = F.cross_entropy(output, target)  # cross entropy loss
-
-            # Backward pass and parameter update
+            output = model(x, dataset=dataset_name)
+            loss = F.cross_entropy(output, target)
             loss.backward()
             optimizer.step()
 
-            # Compute training accuracy for this batch
-            batch_acc = accuracy(output, target, topk=(1,))[0]
-
-            # Update running averages
-            loss_record.update(loss.item(), x.size(0))
-            acc_record.update(batch_acc.item(), x.size(0))
-
-        # Log training metrics to TensorBoard
-        logger.add_scalar('train/cls_loss', loss_record.avg, epoch+1)
-        logger.add_scalar('train/cls_acc', acc_record.avg, epoch+1)
-
-        run_time = time.time() - start
-
-        # Print training progress
-        info = 'train_Epoch:{:03d}/{:03d}\t run_time:{:.3f}\t cls_loss:{:.3f}\t cls_acc:{:.2f}\t'.format(
-            epoch+1, args.epoch, run_time, loss_record.avg, acc_record.avg)
-        print(info)
-
-        # ---------------------------
-        # Validation loop
-        # ---------------------------
-        model.eval()
-        acc_record = AverageMeter()
-        loss_record = AverageMeter()
-        start = time.time()
-
-        for x, target in val_loader:
-            x = x.cuda()
-            target = target.cuda()
-            with torch.no_grad():
-                output = model(x)
-                loss = F.cross_entropy(output, target)
-
-            # Compute validation accuracy
             batch_acc = accuracy(output, target, topk=(1,))[0]
             loss_record.update(loss.item(), x.size(0))
             acc_record.update(batch_acc.item(), x.size(0))
 
         run_time = time.time() - start
 
-        # Log validation metrics
-        logger.add_scalar('val/cls_loss', loss_record.avg, epoch+1)
-        logger.add_scalar('val/cls_acc', acc_record.avg, epoch+1)
+        logger.add_scalar('train/loss', loss_record.avg, epoch + 1)
+        logger.add_scalar('train/acc', acc_record.avg, epoch + 1)
 
-        # Print validation progress
-        info = 'test_Epoch:{:03d}/{:03d}\t run_time:{:.2f}\t cls_loss:{:.3f}\t cls_acc:{:.2f}\n'.format(
-                epoch+1, args.epoch, run_time, loss_record.avg, acc_record.avg)
+        info = f'train_Epoch:{epoch+1:03d}/{args.epoch:03d}\t' \
+               f'run_time:{run_time:.3f}\t' \
+               f'loss:{loss_record.avg:.3f}\t' \
+               f'acc:{acc_record.avg:.2f}'
         print(info)
 
-        # Update learning rate scheduler
         scheduler.step()
 
         # ---------------------------
-        # Save model checkpoints
+        # VALIDATION LOOP
         # ---------------------------
-        # Periodic checkpoint saving
-        if (epoch+1) in args.milestones or epoch+1 == args.epoch or (epoch+1) % args.save_interval == 0:
-            state_dict = dict(epoch=epoch+1, state_dict=model.state_dict(), acc=acc_record.avg)
-            name = osp.join(exp_path, 'ckpt/{:03d}.pth'.format(epoch+1))
-            os.makedirs(osp.dirname(name), exist_ok=True)
-            torch.save(state_dict, name)
+        model.eval()
 
-        # Save best-performing model
-        if acc_record.avg > best_acc:
-            state_dict = dict(epoch=epoch+1, state_dict=model.state_dict(), acc=acc_record.avg)
-            name = osp.join(exp_path, 'ckpt/best.pth')
-            os.makedirs(osp.dirname(name), exist_ok=True)
-            torch.save(state_dict, name)
-            best_acc = acc_record.avg
+        val_coco_loss = AverageMeter()
+        val_coco_acc = AverageMeter()
 
-        print('best_acc: {:.2f}'.format(best_acc))
+        val_ssv2_loss = AverageMeter()
+        val_ssv2_acc = AverageMeter()
 
+        with torch.no_grad():
+
+            # ---- COCO Validation ----
+            for x, target in coco_val_loader:
+                x = x.cuda(non_blocking=True)
+                target = target.cuda(non_blocking=True)
+
+                output = model(x, dataset="coco")
+                loss = F.cross_entropy(output, target)
+
+                acc = accuracy(output, target, topk=(1,))[0]
+
+                val_coco_loss.update(loss.item(), x.size(0))
+                val_coco_acc.update(acc.item(), x.size(0))
+
+            # ---- SSv2 Validation ----
+            for x, target in ssv2_val_loader:
+                x = x.cuda(non_blocking=True)
+                target = target.cuda(non_blocking=True)
+
+                output = model(x, dataset="ssv2")
+                loss = F.cross_entropy(output, target)
+
+                acc = accuracy(output, target, topk=(1,))[0]
+
+                val_ssv2_loss.update(loss.item(), x.size(0))
+                val_ssv2_acc.update(acc.item(), x.size(0))
+
+        # ---- Print Validation Results ----
+
+        print(
+            f"[VAL EPOCH {epoch + 1}] "
+            f"COCO Acc: {val_coco_acc.avg:.2f}%  "
+            f"SSv2 Acc: {val_ssv2_acc.avg:.2f}%"
+        )
+
+        # ---- TensorBoard Logs ----
+        logger.add_scalar('val/coco_acc', val_coco_acc.avg, epoch + 1)
+        logger.add_scalar('val/ssv2_acc', val_ssv2_acc.avg, epoch + 1)
+        logger.add_scalar('val/coco_loss', val_coco_loss.avg, epoch + 1)
+        logger.add_scalar('val/ssv2_loss', val_ssv2_loss.avg, epoch + 1)
+
+        # checkpoint
+        state_dict = dict(epoch=epoch+1, state_dict=model.state_dict())
+        ckpt_dir = osp.join(exp_path, 'ckpt')
+        os.makedirs(ckpt_dir, exist_ok=True)
+        torch.save(state_dict, osp.join(ckpt_dir, f'{epoch+1:03d}.pth'))
+
+    print("Training done.")
 
 # ---------------------------
 # Script entry point
@@ -198,6 +451,7 @@ def main():
 
 ## MILEAGE MAY VARY IF RUNNING ON MAC
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     import torch
     from torch.multiprocessing import set_start_method
 
