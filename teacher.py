@@ -38,27 +38,27 @@ from PIL import Image
 import os
 import subprocess
 
-videos_dir = "./ssv2/videos/"
+videos_dir = "./ssv2/videos/20bn-something-something-v2"
 out_dir = "./ssv2/frames/train/"
 
 os.makedirs(out_dir, exist_ok=True)
 
-for video in os.listdir(videos_dir):
-    if not video.endswith(".webm"):
-        continue
+#for video in os.listdir(videos_dir):
+#    if not video.endswith(".webm"):
+#        continue
 
-    vid = video.replace(".webm", "")
-    out_path = os.path.join(out_dir, vid)
-    os.makedirs(out_path, exist_ok=True)
+#    vid = video.replace(".webm", "")
+#    out_path = os.path.join(out_dir, vid)
+#    os.makedirs(out_path, exist_ok=True)
 
-    cmd = [
-        "ffmpeg",
-        "-i", os.path.join(videos_dir, video),
-        os.path.join(out_path, "%05d.jpg")
-    ]
+#    cmd = [
+  #      "ffmpeg",
+#        "-i", os.path.join(videos_dir, video),
+   #     os.path.join(out_path, "%05d.jpg")
+   # ]
 
-    print("Extracting:", video)
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+   # print("Extracting:", video)
+  #  subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class COCOClassification(Dataset):
@@ -228,6 +228,7 @@ def main():
     parser.add_argument('--milestones', type=int, nargs='+', default=[30, 40])
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--gpu-id', type=int, default=0)
+    parser.add_argument('--resume', type=str, default=None)
     args = parser.parse_args()
 
     # seeds
@@ -268,14 +269,14 @@ def main():
 
     ssv2_train = SomethingSomethingFrameDataset(
         json_file="./ssv2/train.json",
-        frame_root="./ssv2/frames/",
+        frame_root="./ssv2/frames/train",
         transform=transform_train
     )
     NUM_SSV2_CLASSES = len(ssv2_train.template2idx)
 
     ssv2_val = SomethingSomethingFrameDataset(
         json_file="./ssv2/validation.json",  # if you have it
-        frame_root="./ssv2/frames/",
+        frame_root="./ssv2/frames/train",
         transform=transform_train,
         template2idx=ssv2_train.template2idx
     )
@@ -321,6 +322,16 @@ def main():
     # Model, optimizer, scheduler
     # ---------------------------
     model = MultiHeadTeacher(NUM_COCO_CLASSES, NUM_SSV2_CLASSES).cuda()
+
+    start_epoch = 0
+
+    if args.resume is not None:
+        ckpt = torch.load(args.resume, map_location='cuda')
+        model.load_state_dict(ckpt['state_dict'])
+        start_epoch = ckpt.get('epoch', 0)
+        print(f"=> Resumed from {args.resume} (epoch {start_epoch})")
+
+
     optimizer = optim.SGD(model.parameters(), lr=args.lr,
                           momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
@@ -331,7 +342,7 @@ def main():
     # ---------------------------
     # Training loop
     # ---------------------------
-    for epoch in range(args.epoch):
+    for epoch in range(start_epoch, args.epoch):
         model.train()
         loss_record = AverageMeter()
         acc_record = AverageMeter()
